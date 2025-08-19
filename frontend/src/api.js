@@ -1,7 +1,9 @@
-
 import axios from "axios";
 
-export const api = axios.create({ baseURL: "http://localhost:5000" });
+const BASE_URL =
+  import.meta.env.VITE_API_BASE || window.__API_BASE__ || "/";
+
+export const api = axios.create({ baseURL: BASE_URL });
 
 export const listOrcamentos = (q) =>
   api.get("/orcamentos", { params: { q } });
