@@ -1,9 +1,8 @@
 import axios from "axios";
 
-const BASE_URL =
-  import.meta.env.VITE_API_BASE || window.__API_BASE__ || "/";
-
-export const api = axios.create({ baseURL: BASE_URL });
+export const api = axios.create({
+  baseURL: "https://orcamentos-api-ms3w.onrender.com", // << API no Render
+});
 
 export const listOrcamentos = (q) =>
   api.get("/orcamentos", { params: { q } });
