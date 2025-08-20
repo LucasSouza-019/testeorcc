@@ -23,7 +23,7 @@ app.get("/", (req, res) => {
 });
 
 // importa rotas de orçamentos
-const orcamentosRoutes = require("./routes/orcamentos");
+const orcamentosRoutes = require("../backend/src/routes/orcamentos.js");
 app.use("/orcamentos", orcamentosRoutes);
 
 // Start (PORT obrigatória pro Render)
