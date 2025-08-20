@@ -2,16 +2,32 @@ const express = require("express");
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
+
+// Middleware
 app.use(express.json());
 
-// ping
-app.get("/", (req, res) => res.send("API OK"));
+// CORS (libera seu front da Vercel + previews)
+app.use(
+  cors({
+    origin: [
+      "https://testeorcc-5srn.vercel.app", // seu domínio de produção
+      /\.vercel\.app$/                      // libera domínios de preview da Vercel
+    ],
+    credentials: true,
+  })
+);
 
-// ROTAS (deve existir backend/routes/orcamentos.js)
-const orcamentosRoutes = require("./src/routes/orcamentos");
-// sem .ts, sem .txt
+// Rotas
+app.get("/", (req, res) => {
+  res.send("API OK ✅");
+});
+
+// importa rotas de orçamentos
+const orcamentosRoutes = require("./routes/orcamentos");
 app.use("/orcamentos", orcamentosRoutes);
 
-
-app.listen(5000, () => console.log("🚀 Servidor rodando na porta 5000"));
+// Start (PORT obrigatória pro Render)
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log("🚀 Servidor rodando na porta " + PORT);
+});
