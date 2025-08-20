@@ -1,14 +1,11 @@
 const express = require("express");
 const cors = require("cors");
-const db = require("./src/config/db"); // importa conexão
+const db = require("./src/config/db.js"); // importa a conexão (mesmo db das suas rotas)
 
 const app = express();
-app.set("db", db); // guarda no app
 
-// Middleware
+// middlewares
 app.use(express.json());
-
-// CORS
 app.use(
   cors({
     origin: [
@@ -19,27 +16,24 @@ app.use(
   })
 );
 
-// Rotas
+// rota raiz (ping)
 app.get("/", (req, res) => {
   res.send("API OK ✅");
 });
 
+// rotas de orçamentos
 const orcamentosRoutes = require("./src/routes/orcamentos.js");
 app.use("/orcamentos", orcamentosRoutes);
 
-// rota de teste do banco
+// rota de teste do banco (opcional, mas útil)
 app.get("/dbcheck", (req, res) => {
-  const sql = "SELECT DATABASE() as db, NOW() as agora";
-  req.app.get("db").query(sql, (err, rows) => {
-    if (err) {
-      console.error("❌ Erro no DBCheck:", err);
-      return res.status(500).json({ error: err.message });
-    }
+  db.query("SELECT DATABASE() AS db, NOW() AS agora", (err, rows) => {
+    if (err) return res.status(500).json({ error: String(err.message || err) });
     res.json(rows[0]);
   });
 });
 
-// Start
+// start
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log("🚀 Servidor rodando na porta " + PORT);
