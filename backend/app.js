@@ -1,17 +1,19 @@
 const express = require("express");
 const cors = require("cors");
+const db = require("./src/config/db"); // importa conexão
 
 const app = express();
+app.set("db", db); // guarda no app
 
 // Middleware
 app.use(express.json());
 
-// CORS (libera seu front da Vercel + previews)
+// CORS
 app.use(
   cors({
     origin: [
-      "https://testeorcc-5srn.vercel.app", // seu domínio de produção
-      /\.vercel\.app$/                      // libera domínios de preview da Vercel
+      "https://testeorcc-5srn.vercel.app",
+      /\.vercel\.app$/
     ],
     credentials: true,
   })
@@ -22,12 +24,9 @@ app.get("/", (req, res) => {
   res.send("API OK ✅");
 });
 
-// importa rotas de orçamentos
-const orcamentosRoutes = require("../backend/src/routes/orcamentos.js");
+const orcamentosRoutes = require("./src/routes/orcamentos.js");
 app.use("/orcamentos", orcamentosRoutes);
 
-// Start (PORT obrigatória pro Render)
-const PORT = process.env.PORT || 5000;
 // rota de teste do banco
 app.get("/dbcheck", (req, res) => {
   const sql = "SELECT DATABASE() as db, NOW() as agora";
@@ -39,6 +38,9 @@ app.get("/dbcheck", (req, res) => {
     res.json(rows[0]);
   });
 });
+
+// Start
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log("🚀 Servidor rodando na porta " + PORT);
 });
