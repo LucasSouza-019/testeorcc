@@ -14,42 +14,38 @@ const EMPRESA = {
 };
 /* ======================================================================== */
 
-/* ================================ HELPERS =============================== */
-function calcTotais(itens = [], servicos = []) {
-  const totItens = itens.reduce(
-    (s, it) => s + Number(it.qtd || 1) * Number(it.unitario || 0),
-    0
+const brl = (n) =>
+  new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(
+    Number(n || 0)
   );
-  const totMO = servicos.reduce((s, sv) => s + Number(sv.valor || 0), 0);
-  return { totItens, totMO, total: Number((totItens + totMO).toFixed(2)) };
-}
-function brl(n) {
-  return new Intl.NumberFormat("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  }).format(Number(n || 0));
-}
-function safe(n) {
-  const v = Number(n);
-  return Number.isFinite(v) ? v : 0;
-}
-/* ======================================================================== */
+const num = (v, d = 2) => Number(Number(v || 0).toFixed(d));
+const sum = (arr) => arr.reduce((s, n) => s + num(n), 0);
 
-/* ========================== ROTAS DE ORÇAMENTOS ========================= */
+/* Calcula totais a partir dos arrays enviados pelo front */
+function calcTotais(itens = [], servicos = []) {
+  const totItens = sum(
+    itens.map((it) =>
+      it.subtotal != null ? it.subtotal : num(it.qtd || 1) * num(it.unitario || 0)
+    )
+  );
+  const totServ = sum(servicos.map((s) => s.valor || 0));
+  const totalGeral = num(totItens + totServ);
+  return { totItens: num(totItens), totServ: num(totServ), totalGeral };
+}
 
-// LISTAR (resumo)
+/* ============================= LISTAR ============================= */
 router.get("/", (req, res) => {
   const { q } = req.query;
 
   let sql = `
-    SELECT id,
-           cliente_nome AS cliente,
-           descricao,
-           total AS valor,
-           data_criacao
-    FROM orcamentos`;
+    SELECT 
+      id,
+      cliente_nome AS cliente,
+      total_geral AS valor,
+      COALESCE(criado_em, data_criacao) AS data_criacao
+    FROM orcamentos
+  `;
   const params = [];
-
   if (q) {
     if (/^\d+$/.test(q)) {
       sql += " WHERE id = ?";
@@ -59,281 +55,283 @@ router.get("/", (req, res) => {
       params.push(`%${q}%`);
     }
   }
-
   sql += " ORDER BY id DESC";
 
   db.query(sql, params, (err, rows) => {
-    if (err) return res.status(500).json({ error: "Erro ao listar" });
+    if (err) {
+      console.error("LIST ERR:", err);
+      return res.status(500).json({ error: err.sqlMessage || String(err) });
+    }
     res.json(rows);
   });
 });
 
-// DETALHAR (com itens e serviços)
+/* ============================ DETALHAR ============================ */
 router.get("/:id", (req, res) => {
   const { id } = req.params;
-  const getOrc = `SELECT * FROM orcamentos WHERE id = ?`;
-  const getItens = `SELECT id, qtd, descricao, unitario, total FROM orcamento_itens WHERE orcamento_id = ?`;
-  const getServ = `SELECT id, descricao, valor FROM orcamento_servicos WHERE orcamento_id = ?`;
 
-  db.query(getOrc, [id], (e1, r1) => {
-    if (e1) return res.status(500).json({ error: "Erro ao buscar orçamento" });
+  const sqlOrc = `
+    SELECT id, cliente_nome, telefone, placa, observacoes,
+           total_itens, total_servicos, total_geral,
+           COALESCE(criado_em, data_criacao) AS data_criacao
+    FROM orcamentos WHERE id = ?
+  `;
+  const sqlItens = `
+    SELECT id, descricao, qtd, unitario, subtotal, total
+    FROM orcamento_itens WHERE orcamento_id = ?
+  `;
+  const sqlServ = `
+    SELECT id, descricao, valor
+    FROM orcamento_servicos WHERE orcamento_id = ?
+  `;
+
+  db.query(sqlOrc, [id], (e1, r1) => {
+    if (e1) return res.status(500).json({ error: e1.sqlMessage || String(e1) });
     if (!r1.length) return res.status(404).json({ error: "Não encontrado" });
     const o = r1[0];
-    db.query(getItens, [id], (e2, itens) => {
-      if (e2) return res.status(500).json({ error: "Erro ao buscar itens" });
-      db.query(getServ, [id], (e3, servicos) => {
-        if (e3) return res.status(500).json({ error: "Erro ao buscar serviços" });
-        res.json({ ...o, itens, servicos });
+    db.query(sqlItens, [id], (e2, itens = []) => {
+      if (e2) return res.status(500).json({ error: e2.sqlMessage || String(e2) });
+      db.query(sqlServ, [id], (e3, servicos = []) => {
+        if (e3) return res.status(500).json({ error: e3.sqlMessage || String(e3) });
+        res.json({
+          ...o,
+          itens,
+          servicos,
+        });
       });
     });
   });
 });
 
-/* ===================== CRIAR (usa conexão do pool) ===================== */
+/* ============================== CRIAR ============================= */
 router.post("/", (req, res) => {
   const {
     cliente,
     telefone,
-    descricao,
-    carro_marca,
-    carro_modelo,
-    carro_placa,
-    carro_ano,
-    forma_pagamento,
+    placa,
+    observacoes,
     itens = [],
-    mao_obra = [],
-    valor,
+    mao_obra = [], // = servicos
   } = req.body;
 
   if (!cliente) return res.status(400).json({ error: "Informe o cliente" });
 
-  const { total } =
-    itens.length || mao_obra.length
-      ? calcTotais(itens, mao_obra)
-      : { total: Number(valor || 0) };
+  const { totItens, totServ, totalGeral } = calcTotais(itens, mao_obra);
 
-  const insertOrc = `
-    INSERT INTO orcamentos (
-      cliente_nome, telefone, descricao,
-      carro_marca, carro_modelo, carro_placa, carro_ano,
-      forma_pagamento, total
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  const insOrc = `
+    INSERT INTO orcamentos
+      (cliente_nome, telefone, placa, observacoes, total_itens, total_servicos, total_geral)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `;
 
   db.getConnection((err, conn) => {
-    if (err) return res.status(500).json({ error: "Falha na conexão" });
+    if (err) return res.status(500).json({ error: String(err) });
 
     conn.beginTransaction((err) => {
       if (err) {
         conn.release();
-        return res.status(500).json({ error: "Falha ao iniciar transação" });
+        return res.status(500).json({ error: String(err) });
       }
 
       conn.query(
-        insertOrc,
+        insOrc,
         [
           cliente,
           telefone || null,
-          descricao || "",
-          carro_marca || null,
-          carro_modelo || null,
-          carro_placa || null,
-          carro_ano || null,
-          forma_pagamento || null,
-          total,
+          placa || null,
+          observacoes || null,
+          totItens,
+          totServ,
+          totalGeral,
         ],
         (e1, r1) => {
           if (e1) {
+            console.error("INSERT orcamentos ERR:", e1);
             return conn.rollback(() => {
               conn.release();
-              res.status(500).json({ error: "Erro ao criar orçamento" });
+              res.status(500).json({ error: e1.sqlMessage || String(e1) });
             });
           }
 
           const orcId = r1.insertId;
 
-          const insertItens = () => {
-            if (!itens.length) return insertServicos();
-            const values = itens.map((it) => [
-              orcId,
-              safe(it.qtd || 1),
-              it.descricao || "",
-              safe(it.unitario || 0),
-              Number((safe(it.qtd || 1) * safe(it.unitario || 0)).toFixed(2)),
-            ]);
+          const insItens = () => {
+            if (!itens.length) return insServ();
+            const values = itens.map((it) => {
+              const qtd = num(it.qtd || 1);
+              const unit = num(it.unitario || 0);
+              const subtotal = it.subtotal != null ? num(it.subtotal) : num(qtd * unit);
+              const total = it.total != null ? num(it.total) : subtotal; // seu schema tem ambos
+              return [orcId, it.descricao || "", qtd, unit, subtotal, total];
+            });
             conn.query(
-              "INSERT INTO orcamento_itens (orcamento_id, qtd, descricao, unitario, total) VALUES ?",
+              "INSERT INTO orcamento_itens (orcamento_id, descricao, qtd, unitario, subtotal, total) VALUES ?",
               [values],
               (e2) => {
-                if (e2)
+                if (e2) {
+                  console.error("INSERT itens ERR:", e2);
                   return conn.rollback(() => {
                     conn.release();
-                    res.status(500).json({ error: "Erro ao salvar itens" });
+                    res.status(500).json({ error: e2.sqlMessage || String(e2) });
                   });
-                insertServicos();
+                }
+                insServ();
               }
             );
           };
 
-          const insertServicos = () => {
+          const insServ = () => {
             if (!mao_obra.length) return commitAll();
-            const values = mao_obra.map((sv) => [
-              orcId,
-              sv.descricao || "",
-              safe(sv.valor || 0),
-            ]);
+            const values = mao_obra.map((sv) => [orcId, sv.descricao || "", num(sv.valor || 0)]);
             conn.query(
               "INSERT INTO orcamento_servicos (orcamento_id, descricao, valor) VALUES ?",
               [values],
               (e3) => {
-                if (e3)
+                if (e3) {
+                  console.error("INSERT servicos ERR:", e3);
                   return conn.rollback(() => {
                     conn.release();
-                    res.status(500).json({ error: "Erro ao salvar serviços" });
+                    res.status(500).json({ error: e3.sqlMessage || String(e3) });
                   });
+                }
                 commitAll();
               }
             );
           };
 
-          const commitAll = () => {
+          const commitAll = () =>
             conn.commit((e4) => {
-              if (e4)
+              if (e4) {
+                console.error("COMMIT ERR:", e4);
                 return conn.rollback(() => {
                   conn.release();
-                  res.status(500).json({ error: "Erro ao finalizar transação" });
+                  res.status(500).json({ error: e4.sqlMessage || String(e4) });
                 });
+              }
               conn.release();
-              res.json({ id: orcId, cliente, total });
+              res.status(201).json({ id: orcId, cliente, total_geral: totalGeral });
             });
-          };
 
-          insertItens();
+          insItens();
         }
       );
     });
   });
 });
 
-/* ===================== ATUALIZAR (usa conexão do pool) ===================== */
+/* ============================== ATUALIZAR ============================== */
 router.put("/:id", (req, res) => {
   const { id } = req.params;
   const {
     cliente,
     telefone,
-    descricao,
-    carro_marca,
-    carro_modelo,
-    carro_placa,
-    carro_ano,
-    forma_pagamento,
+    placa,
+    observacoes,
     itens = [],
     mao_obra = [],
   } = req.body;
 
-  const { total } = calcTotais(itens, mao_obra);
+  const { totItens, totServ, totalGeral } = calcTotais(itens, mao_obra);
 
   db.getConnection((err, conn) => {
-    if (err) return res.status(500).json({ error: "Falha na conexão" });
+    if (err) return res.status(500).json({ error: String(err) });
 
     conn.beginTransaction((err) => {
       if (err) {
         conn.release();
-        return res.status(500).json({ error: "Falha ao iniciar transação" });
+        return res.status(500).json({ error: String(err) });
       }
 
-      const upOrc = `UPDATE orcamentos SET
-        cliente_nome=?, telefone=?, descricao=?, carro_marca=?, carro_modelo=?, carro_placa=?, carro_ano=?, forma_pagamento=?, total=?
-        WHERE id = ?`;
-
+      const up = `
+        UPDATE orcamentos SET
+          cliente_nome = ?, telefone = ?, placa = ?, observacoes = ?,
+          total_itens = ?, total_servicos = ?, total_geral = ?
+        WHERE id = ?
+      `;
       conn.query(
-        upOrc,
-        [
-          cliente,
-          telefone,
-          descricao,
-          carro_marca,
-          carro_modelo,
-          carro_placa,
-          carro_ano,
-          forma_pagamento,
-          total,
-          id,
-        ],
+        up,
+        [cliente, telefone, placa, observacoes, totItens, totServ, totalGeral, id],
         (e1, r1) => {
           if (e1) {
+            console.error("UPDATE orcamentos ERR:", e1);
             return conn.rollback(() => {
               conn.release();
-              res.status(500).json({ error: "Erro ao atualizar orçamento" });
+              res.status(500).json({ error: e1.sqlMessage || String(e1) });
             });
           }
           if (r1.affectedRows === 0) {
-            return conn.rollback(() => {
-              conn.release();
-              res.status(404).json({ error: "Não encontrado" });
-            });
+            conn.release();
+            return res.status(404).json({ error: "Não encontrado" });
           }
 
           conn.query(
             "DELETE FROM orcamento_itens WHERE orcamento_id = ?",
             [id],
             (e2) => {
-              if (e2)
+              if (e2) {
+                console.error("DELETE itens ERR:", e2);
                 return conn.rollback(() => {
                   conn.release();
-                  res.status(500).json({ error: "Erro ao limpar itens" });
+                  res.status(500).json({ error: e2.sqlMessage || String(e2) });
                 });
+              }
 
               conn.query(
                 "DELETE FROM orcamento_servicos WHERE orcamento_id = ?",
                 [id],
                 (e3) => {
-                  if (e3)
+                  if (e3) {
+                    console.error("DELETE servicos ERR:", e3);
                     return conn.rollback(() => {
                       conn.release();
-                      res.status(500).json({ error: "Erro ao limpar serviços" });
+                      res.status(500).json({ error: e3.sqlMessage || String(e3) });
                     });
+                  }
 
-                  const insertItens = () => {
-                    if (!itens.length) return insertServicos();
-                    const values = itens.map((it) => [
-                      id,
-                      safe(it.qtd || 1),
-                      it.descricao || "",
-                      safe(it.unitario || 0),
-                      Number((safe(it.qtd || 1) * safe(it.unitario || 0)).toFixed(2)),
-                    ]);
+                  const insItens = () => {
+                    if (!itens.length) return insServ();
+                    const values = itens.map((it) => {
+                      const qtd = num(it.qtd || 1);
+                      const unit = num(it.unitario || 0);
+                      const subtotal =
+                        it.subtotal != null ? num(it.subtotal) : num(qtd * unit);
+                      const total = it.total != null ? num(it.total) : subtotal;
+                      return [id, it.descricao || "", qtd, unit, subtotal, total];
+                    });
                     conn.query(
-                      "INSERT INTO orcamento_itens (orcamento_id, qtd, descricao, unitario, total) VALUES ?",
+                      "INSERT INTO orcamento_itens (orcamento_id, descricao, qtd, unitario, subtotal, total) VALUES ?",
                       [values],
                       (e4) => {
-                        if (e4)
+                        if (e4) {
+                          console.error("RE-INSERT itens ERR:", e4);
                           return conn.rollback(() => {
                             conn.release();
-                            res.status(500).json({ error: "Erro ao salvar itens" });
+                            res.status(500).json({ error: e4.sqlMessage || String(e4) });
                           });
-                        insertServicos();
+                        }
+                        insServ();
                       }
                     );
                   };
 
-                  const insertServicos = () => {
+                  const insServ = () => {
                     if (!mao_obra.length) return commitAll();
                     const values = mao_obra.map((sv) => [
                       id,
                       sv.descricao || "",
-                      safe(sv.valor || 0),
+                      num(sv.valor || 0),
                     ]);
                     conn.query(
                       "INSERT INTO orcamento_servicos (orcamento_id, descricao, valor) VALUES ?",
                       [values],
                       (e5) => {
-                        if (e5)
+                        if (e5) {
+                          console.error("RE-INSERT servicos ERR:", e5);
                           return conn.rollback(() => {
                             conn.release();
-                            res
-                              .status(500)
-                              .json({ error: "Erro ao salvar serviços" });
+                            res.status(500).json({ error: e5.sqlMessage || String(e5) });
                           });
+                        }
                         commitAll();
                       }
                     );
@@ -341,18 +339,18 @@ router.put("/:id", (req, res) => {
 
                   const commitAll = () =>
                     conn.commit((e6) => {
-                      if (e6)
+                      if (e6) {
+                        console.error("COMMIT update ERR:", e6);
                         return conn.rollback(() => {
                           conn.release();
-                          res
-                            .status(500)
-                            .json({ error: "Erro ao finalizar transação" });
+                          res.status(500).json({ error: e6.sqlMessage || String(e6) });
                         });
+                      }
                       conn.release();
-                      res.json({ success: true, id: Number(id), total });
+                      res.json({ success: true, id: Number(id), total_geral: totalGeral });
                     });
 
-                  insertServicos();
+                  insItens();
                 }
               );
             }
@@ -367,23 +365,31 @@ router.put("/:id", (req, res) => {
 router.delete("/:id", (req, res) => {
   const { id } = req.params;
   db.query("DELETE FROM orcamentos WHERE id = ?", [id], (err, result) => {
-    if (err) return res.status(500).json({ error: "Erro ao excluir" });
+    if (err) return res.status(500).json({ error: err.sqlMessage || String(err) });
     if (result.affectedRows === 0)
       return res.status(404).json({ error: "Não encontrado" });
     res.json({ success: true });
   });
 });
 
-/* ============================== PDF AVANÇADO ============================= */
+/* ============================== PDF ============================== */
 router.get("/:id/pdf", (req, res) => {
   const { id } = req.params;
 
-  const sqlOrc = `SELECT id, cliente_nome AS cliente, telefone, descricao, total,
-                         carro_marca, carro_modelo, carro_placa, carro_ano,
-                         forma_pagamento, data_criacao
-                  FROM orcamentos WHERE id = ?`;
-  const sqlItens = `SELECT qtd, descricao, unitario, total FROM orcamento_itens WHERE orcamento_id = ?`;
-  const sqlServ = `SELECT descricao, valor FROM orcamento_servicos WHERE orcamento_id = ?`;
+  const sqlOrc = `
+    SELECT id, cliente_nome AS cliente, telefone, placa, observacoes,
+           total_itens, total_servicos, total_geral,
+           COALESCE(criado_em, data_criacao) AS data_criacao
+    FROM orcamentos WHERE id = ?
+  `;
+  const sqlItens = `
+    SELECT descricao, qtd, unitario, subtotal, total
+    FROM orcamento_itens WHERE orcamento_id = ?
+  `;
+  const sqlServ = `
+    SELECT descricao, valor
+    FROM orcamento_servicos WHERE orcamento_id = ?
+  `;
 
   db.query(sqlOrc, [id], (e1, r1) => {
     if (e1 || !r1.length) return res.status(404).json({ error: "Não encontrado" });
@@ -400,155 +406,121 @@ router.get("/:id/pdf", (req, res) => {
         );
         doc.pipe(res);
 
-        // ===== Cabeçalho
         const hasLogo = fs.existsSync(logoPath);
         if (hasLogo) {
           try {
             doc.image(logoPath, 40, 40, { width: 100 });
           } catch {}
         }
-        doc
-          .fontSize(16)
-          .text(EMPRESA.nome, hasLogo ? 150 : 40, 40, { continued: false, bold: true });
-        doc
-          .fontSize(10)
-          .text(EMPRESA.endereco)
-          .text(EMPRESA.telefone)
-          .moveDown(0.5);
-        doc
-          .fontSize(14)
-          .text(`ORÇAMENTO #${o.id}`, { align: "right" })
-          .moveDown(0.5);
+        doc.fontSize(16).text(EMPRESA.nome, hasLogo ? 150 : 40, 40);
+        doc.fontSize(10).text(EMPRESA.endereco).text(EMPRESA.telefone).moveDown(0.5);
+        doc.fontSize(14).text(`ORÇAMENTO #${o.id}`, { align: "right" }).moveDown(0.5);
 
-        // ===== Dados do cliente / veículo
+        // Cliente / veículo
         doc
           .rect(40, doc.y, 515, 70)
           .stroke()
           .fontSize(11)
           .text(`Cliente: ${o.cliente || "-"}`, 50, doc.y + 10)
           .text(`Telefone: ${o.telefone || "-"}`)
+          .text(`Placa: ${o.placa || "-"}`)
           .text(
-            `Veículo: ${[
-              o.carro_marca,
-              o.carro_modelo,
-              o.carro_ano ? `ano ${o.carro_ano}` : "",
-              o.carro_placa ? `placa ${o.carro_placa}` : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}`
-          )
-          .text(`Forma de pagamento: ${o.forma_pagamento || "-"}`);
+            `Data: ${
+              o.data_criacao
+                ? new Date(o.data_criacao).toLocaleString("pt-BR")
+                : "-"
+            }`
+          );
 
-        doc.moveDown(2);
+        // Itens
+        let y = doc.y + 30;
+        doc.fontSize(12).text("Peças / Itens", 40, y);
+        doc.moveTo(40, y + 16).lineTo(555, y + 16).stroke();
+        y += 22;
 
-        // ===== Tabela de Itens
-        const startY = doc.y + 5;
-        doc.fontSize(12).text("Peças / Itens", 40, startY);
-        doc.moveTo(40, startY + 16).lineTo(555, startY + 16).stroke();
-
-        const cols = [
-          { k: "qtd", title: "Qtd", w: 60, align: "right" },
-          { k: "descricao", title: "Descrição", w: 320 },
-          { k: "unitario", title: "Unitário", w: 85, align: "right", fmt: brl },
-          { k: "total", title: "Subtotal", w: 85, align: "right", fmt: brl },
+        const head = [
+          { t: "Qtd", w: 50, a: "right", k: "qtd" },
+          { t: "Descrição", w: 320, a: "left", k: "descricao" },
+          { t: "Unitário", w: 90, a: "right", k: "unitario", f: brl },
+          { t: "Subtotal", w: 90, a: "right", k: "subtotal", f: brl },
         ];
 
-        function tableHeader(y) {
+        const drawHeader = (yy) => {
           let x = 40;
-          doc.fontSize(10).fillColor("#000");
-          cols.forEach((c) => {
-            doc.text(c.title, x, y, {
-              width: c.w,
-              align: c.align || "left",
-            });
+          doc.fontSize(10);
+          head.forEach((c) => {
+            doc.text(c.t, x, yy, { width: c.w, align: c.a });
             x += c.w + 5;
           });
-        }
-        function tableRow(row, y) {
+        };
+        const drawRow = (row, yy) => {
           let x = 40;
-          cols.forEach((c) => {
-            const v = c.fmt ? c.fmt(row[c.k]) : row[c.k];
-            doc.text(String(v ?? ""), x, y, {
-              width: c.w,
-              align: c.align || "left",
-            });
+          head.forEach((c) => {
+            const v = c.f ? c.f(row[c.k]) : row[c.k];
+            doc.text(String(v ?? ""), x, yy, { width: c.w, align: c.a });
             x += c.w + 5;
           });
-        }
+        };
 
-        let y = startY + 22;
-        tableHeader(y);
+        drawHeader(y);
         y += 14;
         (itens || []).forEach((it) => {
           if (y > 760) {
             doc.addPage();
             y = 50;
-            tableHeader(y);
+            drawHeader(y);
             y += 14;
           }
-          tableRow(
-            {
-              qtd: safe(it.qtd || 1),
-              descricao: it.descricao || "",
-              unitario: safe(it.unitario || 0),
-              total: safe(it.total || safe(it.qtd || 1) * safe(it.unitario || 0)),
-            },
-            y
-          );
+          drawRow(it, y);
           y += 14;
         });
 
-        // ===== Serviços
-        y += 14;
+        // Serviços
+        y += 16;
         if (y > 760) {
           doc.addPage();
           y = 50;
         }
         doc.fontSize(12).text("Serviços", 40, y);
         doc.moveTo(40, y + 16).lineTo(555, y + 16).stroke();
+        y += 22;
 
-        const colsServ = [
-          { k: "descricao", title: "Descrição", w: 405 },
-          { k: "valor", title: "Valor", w: 120, align: "right", fmt: brl },
+        const headS = [
+          { t: "Descrição", w: 410, a: "left", k: "descricao" },
+          { t: "Valor", w: 140, a: "right", k: "valor", f: brl },
         ];
-
-        function servHeader(yy) {
+        const hS = (yy) => {
           let x = 40;
           doc.fontSize(10);
-          colsServ.forEach((c) => {
-            doc.text(c.title, x, yy, { width: c.w, align: c.align || "left" });
+          headS.forEach((c) => {
+            doc.text(c.t, x, yy, { width: c.w, align: c.a });
             x += c.w + 5;
           });
-        }
-        function servRow(row, yy) {
+        };
+        const rS = (row, yy) => {
           let x = 40;
-          colsServ.forEach((c) => {
-            const v = c.fmt ? c.fmt(row[c.k]) : row[c.k];
-            doc.text(String(v ?? ""), x, yy, {
-              width: c.w,
-              align: c.align || "left",
-            });
+          headS.forEach((c) => {
+            const v = c.f ? c.f(row[c.k]) : row[c.k];
+            doc.text(String(v ?? ""), x, yy, { width: c.w, align: c.a });
             x += c.w + 5;
           });
-        }
+        };
 
-        y += 22;
-        servHeader(y);
+        hS(y);
         y += 14;
         (servicos || []).forEach((sv) => {
           if (y > 760) {
             doc.addPage();
             y = 50;
-            servHeader(y);
+            hS(y);
             y += 14;
           }
-          servRow({ descricao: sv.descricao || "", valor: safe(sv.valor || 0) }, y);
+          rS(sv, y);
           y += 14;
         });
 
-        // ===== Totais
-        const { totItens, totMO, total } = calcTotais(itens || [], servicos || []);
-        y += 18;
+        // Totais
+        y += 20;
         if (y > 740) {
           doc.addPage();
           y = 50;
@@ -559,27 +531,22 @@ router.get("/:id/pdf", (req, res) => {
           .moveTo(40, y + 16)
           .lineTo(555, y + 16)
           .stroke();
-
         y += 20;
         doc
           .fontSize(11)
-          .text(`Peças / Itens: ${brl(totItens)}`, 40, y)
-          .text(`Serviços: ${brl(totMO)}`, 40, y + 16)
+          .text(`Peças / Itens: ${brl(o.total_itens)}`, 40, y)
+          .text(`Serviços: ${brl(o.total_servicos)}`, 40, y + 16)
           .font("Helvetica-Bold")
-          .text(`TOTAL: ${brl(total)}`, 400, y + 8, { align: "right" })
+          .text(`TOTAL: ${brl(o.total_geral)}`, 400, y + 8, { align: "right" })
           .font("Helvetica");
 
-        // ===== Observações
+        // Observações
         y += 48;
-        if (o.descricao) {
-          doc
-            .fontSize(11)
-            .text("Observações:", 40, y)
-            .fontSize(10)
-            .text(o.descricao, 40, y + 16, { width: 515 });
+        if (o.observacoes) {
+          doc.fontSize(11).text("Observações:", 40, y);
+          doc.fontSize(10).text(o.observacoes, 40, y + 16, { width: 515 });
         }
 
-        // ===== Rodapé
         doc.fontSize(9).text("Documento gerado automaticamente.", 40, 800, {
           align: "center",
           width: 515,
