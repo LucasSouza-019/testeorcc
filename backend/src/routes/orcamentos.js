@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const path = require("path");
+const fs = require("fs");
 const db = require("../config/db");
 const PDFDocument = require("pdfkit");
 
@@ -27,6 +28,10 @@ function brl(n) {
     style: "currency",
     currency: "BRL",
   }).format(Number(n || 0));
+}
+function safe(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v : 0;
 }
 /* ======================================================================== */
 
@@ -84,7 +89,7 @@ router.get("/:id", (req, res) => {
   });
 });
 
-// CRIAR (com transação via conexão do pool)
+/* ===================== CRIAR (usa conexão do pool) ===================== */
 router.post("/", (req, res) => {
   const {
     cliente,
@@ -114,7 +119,6 @@ router.post("/", (req, res) => {
       forma_pagamento, total
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-  // >>>> pega uma conexão do pool
   db.getConnection((err, conn) => {
     if (err) return res.status(500).json({ error: "Falha na conexão" });
 
@@ -151,10 +155,10 @@ router.post("/", (req, res) => {
             if (!itens.length) return insertServicos();
             const values = itens.map((it) => [
               orcId,
-              Number(it.qtd || 1),
+              safe(it.qtd || 1),
               it.descricao || "",
-              Number(it.unitario || 0),
-              Number((Number(it.qtd || 1) * Number(it.unitario || 0)).toFixed(2)),
+              safe(it.unitario || 0),
+              Number((safe(it.qtd || 1) * safe(it.unitario || 0)).toFixed(2)),
             ]);
             conn.query(
               "INSERT INTO orcamento_itens (orcamento_id, qtd, descricao, unitario, total) VALUES ?",
@@ -175,7 +179,7 @@ router.post("/", (req, res) => {
             const values = mao_obra.map((sv) => [
               orcId,
               sv.descricao || "",
-              Number(sv.valor || 0),
+              safe(sv.valor || 0),
             ]);
             conn.query(
               "INSERT INTO orcamento_servicos (orcamento_id, descricao, valor) VALUES ?",
@@ -210,7 +214,7 @@ router.post("/", (req, res) => {
   });
 });
 
-// ATUALIZAR (com transação via conexão do pool)
+/* ===================== ATUALIZAR (usa conexão do pool) ===================== */
 router.put("/:id", (req, res) => {
   const { id } = req.params;
   const {
@@ -293,12 +297,10 @@ router.put("/:id", (req, res) => {
                     if (!itens.length) return insertServicos();
                     const values = itens.map((it) => [
                       id,
-                      Number(it.qtd || 1),
+                      safe(it.qtd || 1),
                       it.descricao || "",
-                      Number(it.unitario || 0),
-                      Number(
-                        (Number(it.qtd || 1) * Number(it.unitario || 0)).toFixed(2)
-                      ),
+                      safe(it.unitario || 0),
+                      Number((safe(it.qtd || 1) * safe(it.unitario || 0)).toFixed(2)),
                     ]);
                     conn.query(
                       "INSERT INTO orcamento_itens (orcamento_id, qtd, descricao, unitario, total) VALUES ?",
@@ -319,7 +321,7 @@ router.put("/:id", (req, res) => {
                     const values = mao_obra.map((sv) => [
                       id,
                       sv.descricao || "",
-                      Number(sv.valor || 0),
+                      safe(sv.valor || 0),
                     ]);
                     conn.query(
                       "INSERT INTO orcamento_servicos (orcamento_id, descricao, valor) VALUES ?",
@@ -350,7 +352,7 @@ router.put("/:id", (req, res) => {
                       res.json({ success: true, id: Number(id), total });
                     });
 
-                  insertItens();
+                  insertServicos();
                 }
               );
             }
@@ -361,7 +363,7 @@ router.put("/:id", (req, res) => {
   });
 });
 
-// EXCLUIR
+/* =============================== EXCLUIR =============================== */
 router.delete("/:id", (req, res) => {
   const { id } = req.params;
   db.query("DELETE FROM orcamentos WHERE id = ?", [id], (err, result) => {
@@ -398,16 +400,192 @@ router.get("/:id/pdf", (req, res) => {
         );
         doc.pipe(res);
 
-        /* ======= (restante do seu código de PDF permanece igual) ======= */
-        // ... (mantive o mesmo conteúdo do seu arquivo original)
-        // Para encurtar aqui, não alterei a lógica do PDF.
-        // ===> Cole aqui exatamente o mesmo bloco do PDF do seu arquivo atual <===
-        // (todo o trecho entre "/* ============================== PDF AVANÇADO ============================= */"
-        //  até "doc.end();", que você já tinha.)
-        // ----------------------------------------------------------------------
+        // ===== Cabeçalho
+        const hasLogo = fs.existsSync(logoPath);
+        if (hasLogo) {
+          try {
+            doc.image(logoPath, 40, 40, { width: 100 });
+          } catch {}
+        }
+        doc
+          .fontSize(16)
+          .text(EMPRESA.nome, hasLogo ? 150 : 40, 40, { continued: false, bold: true });
+        doc
+          .fontSize(10)
+          .text(EMPRESA.endereco)
+          .text(EMPRESA.telefone)
+          .moveDown(0.5);
+        doc
+          .fontSize(14)
+          .text(`ORÇAMENTO #${o.id}`, { align: "right" })
+          .moveDown(0.5);
 
-        // IMPORTANTE: não esqueça de finalizar o doc no fim do seu bloco:
-        // doc.end();
+        // ===== Dados do cliente / veículo
+        doc
+          .rect(40, doc.y, 515, 70)
+          .stroke()
+          .fontSize(11)
+          .text(`Cliente: ${o.cliente || "-"}`, 50, doc.y + 10)
+          .text(`Telefone: ${o.telefone || "-"}`)
+          .text(
+            `Veículo: ${[
+              o.carro_marca,
+              o.carro_modelo,
+              o.carro_ano ? `ano ${o.carro_ano}` : "",
+              o.carro_placa ? `placa ${o.carro_placa}` : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}`
+          )
+          .text(`Forma de pagamento: ${o.forma_pagamento || "-"}`);
+
+        doc.moveDown(2);
+
+        // ===== Tabela de Itens
+        const startY = doc.y + 5;
+        doc.fontSize(12).text("Peças / Itens", 40, startY);
+        doc.moveTo(40, startY + 16).lineTo(555, startY + 16).stroke();
+
+        const cols = [
+          { k: "qtd", title: "Qtd", w: 60, align: "right" },
+          { k: "descricao", title: "Descrição", w: 320 },
+          { k: "unitario", title: "Unitário", w: 85, align: "right", fmt: brl },
+          { k: "total", title: "Subtotal", w: 85, align: "right", fmt: brl },
+        ];
+
+        function tableHeader(y) {
+          let x = 40;
+          doc.fontSize(10).fillColor("#000");
+          cols.forEach((c) => {
+            doc.text(c.title, x, y, {
+              width: c.w,
+              align: c.align || "left",
+            });
+            x += c.w + 5;
+          });
+        }
+        function tableRow(row, y) {
+          let x = 40;
+          cols.forEach((c) => {
+            const v = c.fmt ? c.fmt(row[c.k]) : row[c.k];
+            doc.text(String(v ?? ""), x, y, {
+              width: c.w,
+              align: c.align || "left",
+            });
+            x += c.w + 5;
+          });
+        }
+
+        let y = startY + 22;
+        tableHeader(y);
+        y += 14;
+        (itens || []).forEach((it) => {
+          if (y > 760) {
+            doc.addPage();
+            y = 50;
+            tableHeader(y);
+            y += 14;
+          }
+          tableRow(
+            {
+              qtd: safe(it.qtd || 1),
+              descricao: it.descricao || "",
+              unitario: safe(it.unitario || 0),
+              total: safe(it.total || safe(it.qtd || 1) * safe(it.unitario || 0)),
+            },
+            y
+          );
+          y += 14;
+        });
+
+        // ===== Serviços
+        y += 14;
+        if (y > 760) {
+          doc.addPage();
+          y = 50;
+        }
+        doc.fontSize(12).text("Serviços", 40, y);
+        doc.moveTo(40, y + 16).lineTo(555, y + 16).stroke();
+
+        const colsServ = [
+          { k: "descricao", title: "Descrição", w: 405 },
+          { k: "valor", title: "Valor", w: 120, align: "right", fmt: brl },
+        ];
+
+        function servHeader(yy) {
+          let x = 40;
+          doc.fontSize(10);
+          colsServ.forEach((c) => {
+            doc.text(c.title, x, yy, { width: c.w, align: c.align || "left" });
+            x += c.w + 5;
+          });
+        }
+        function servRow(row, yy) {
+          let x = 40;
+          colsServ.forEach((c) => {
+            const v = c.fmt ? c.fmt(row[c.k]) : row[c.k];
+            doc.text(String(v ?? ""), x, yy, {
+              width: c.w,
+              align: c.align || "left",
+            });
+            x += c.w + 5;
+          });
+        }
+
+        y += 22;
+        servHeader(y);
+        y += 14;
+        (servicos || []).forEach((sv) => {
+          if (y > 760) {
+            doc.addPage();
+            y = 50;
+            servHeader(y);
+            y += 14;
+          }
+          servRow({ descricao: sv.descricao || "", valor: safe(sv.valor || 0) }, y);
+          y += 14;
+        });
+
+        // ===== Totais
+        const { totItens, totMO, total } = calcTotais(itens || [], servicos || []);
+        y += 18;
+        if (y > 740) {
+          doc.addPage();
+          y = 50;
+        }
+        doc
+          .fontSize(12)
+          .text("Totais", 40, y)
+          .moveTo(40, y + 16)
+          .lineTo(555, y + 16)
+          .stroke();
+
+        y += 20;
+        doc
+          .fontSize(11)
+          .text(`Peças / Itens: ${brl(totItens)}`, 40, y)
+          .text(`Serviços: ${brl(totMO)}`, 40, y + 16)
+          .font("Helvetica-Bold")
+          .text(`TOTAL: ${brl(total)}`, 400, y + 8, { align: "right" })
+          .font("Helvetica");
+
+        // ===== Observações
+        y += 48;
+        if (o.descricao) {
+          doc
+            .fontSize(11)
+            .text("Observações:", 40, y)
+            .fontSize(10)
+            .text(o.descricao, 40, y + 16, { width: 515 });
+        }
+
+        // ===== Rodapé
+        doc.fontSize(9).text("Documento gerado automaticamente.", 40, 800, {
+          align: "center",
+          width: 515,
+        });
+
+        doc.end();
       });
     });
   });
